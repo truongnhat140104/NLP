@@ -5,13 +5,11 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 import random
 import time
 import math
 import sys
-from nltk.translate.bleu_score import sentence_bleu
-
 
 # ==========================================
 # 1. CẤU HÌNH (CONFIGURATION)
@@ -23,6 +21,8 @@ class Config:
     VAL_EN_PATH = "Data/Value/val.en"
     VAL_FR_PATH = "Data/Value/val.fr"
     MODEL_SAVE_PATH = "best_model.pt"
+    TEST_EN_PATH = "Data/Test/test_2016_flickr.en"
+    TEST_FR_PATH = "Data/Test/test_2016_flickr.fr"
 
     # Model Hyperparameters
     ENC_EMB_DIM = 512 #256
@@ -72,30 +72,33 @@ except OSError:
     sys.exit()
 
 
-def read_data(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f]
+def read_data(path_en, path_fr):
+    with open(path_en, "r", encoding="utf-8") as f:
+        data_en = [line.strip() for line in f]
+    with open(path_fr, "r", encoding="utf-8") as f:
+        data_fr = [line.strip() for line in f]
+    return list(zip(data_en, data_fr))
 
 
-def yield_tokens(data, tokenizer):
-    for text in data:
-        yield tokenizer(text)
+def yield_tokens(data_iterator, tokenizer, index):
+    for data_sample in data_iterator:
+        yield tokenizer(data_sample[index])
 
 
 # Load Raw Data
-train_data_en = read_data(Config.TRAIN_EN_PATH)
-train_data_fr = read_data(Config.TRAIN_FR_PATH)
-full_dataset = list(zip(train_data_en, train_data_fr))
+train_data = read_data(Config.TRAIN_EN_PATH, Config.TRAIN_FR_PATH)
+val_data = read_data(Config.VAL_EN_PATH, Config.VAL_FR_PATH)
+test_data = read_data(Config.TEST_EN_PATH, Config.TEST_FR_PATH)
 
 # Build Vocab
 vocab_en = build_vocab_from_iterator(
-    yield_tokens(train_data_en, en_tokenizer),
+    yield_tokens(train_data, en_tokenizer, 0), # 0 là tiếng Anh
     min_freq=1,
     specials=Config.SPECIAL_TOKENS,
     special_first=True
 )
 vocab_fr = build_vocab_from_iterator(
-    yield_tokens(train_data_fr, fr_tokenizer),
+    yield_tokens(train_data, fr_tokenizer, 1),
     min_freq=1,
     specials=Config.SPECIAL_TOKENS,
     special_first=True
@@ -133,14 +136,17 @@ def collate_batch(batch):
     return src_batch, trg_batch, src_lens
 
 
-# Split Train/Val
-train_size = int(0.9 * len(full_dataset))
-val_size = len(full_dataset) - train_size
-train_set, val_set = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+train_loader = DataLoader(train_data, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch, shuffle=True)
 
-train_loader = DataLoader(train_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch, shuffle=True)
-val_loader = DataLoader(val_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch)
-
+if len(val_data) == 0:
+    print("Không có dữ liệu Val riêng, sẽ cắt 10% từ tập Train.")
+    train_size = int(0.9 * len(train_data))
+    val_size = len(train_data) - train_size
+    train_set, val_set = torch.utils.data.random_split(train_data, [train_size, val_size])
+    train_loader = DataLoader(train_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch)
+else:
+    val_loader = DataLoader(val_data, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch)
 
 # ==========================================
 # 3. KIẾN TRÚC MÔ HÌNH (MODEL ARCHITECTURE)
@@ -224,9 +230,7 @@ model.apply(init_weights)
 
 optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2)
-
 criterion = nn.CrossEntropyLoss(ignore_index=vocab_fr['<pad>'])
-
 
 # ==========================================
 # 4. TRAINING LOOP UTILITIES
@@ -297,6 +301,44 @@ def translate_sentence(sentence, model, max_len=50):
     return " ".join(trg_tokens[1:-1])
 
 
+def calculate_bleu_on_test_set(model, test_en_path, test_fr_path):
+    print("\n--- BẮT ĐẦU ĐÁNH GIÁ TRÊN TẬP TEST ---")
+    model.eval()
+
+    # Đọc file
+    with open(test_en_path, 'r', encoding='utf-8') as f:
+        test_en = [line.strip() for line in f]
+    with open(test_fr_path, 'r', encoding='utf-8') as f:
+        test_fr = [line.strip() for line in f]
+
+    predictions = []
+    references = []
+
+    # Duyệt qua từng câu trong tập test
+    for i in range(len(test_en)):
+        src = test_en[i]
+        trg = test_fr[i]
+
+        # Dùng hàm translate đã viết ở bước trước
+        pred_sent = translate_sentence(src)
+
+        # Tokenize kết quả dự đoán
+        pred_tokens = fr_tokenizer(pred_sent)
+        predictions.append(pred_tokens)
+
+        # Tokenize đáp án thật (Reference phải là list of list)
+        ref_tokens = [fr_tokenizer(trg)]
+        references.append(ref_tokens)
+
+        if (i + 1) % 100 == 0:
+            print(f"Đã xử lý {i + 1}/{len(test_en)} câu...")
+
+    # Tính BLEU score bằng thư viện nltk
+    score = corpus_bleu(references, predictions)
+    print(f"------------------------------------------------")
+    print(f"TEST SET BLEU SCORE: {score * 100:.2f}")
+    print(f"------------------------------------------------")
+
 # ==========================================
 # 5. MAIN EXECUTION
 # ==========================================
@@ -332,21 +374,5 @@ if __name__ == "__main__":
             print("🛑 Early Stopping!")
             break
 
-    # --- TEST SAU KHI TRAIN ---
-    print("\n--- Đang Test Dịch (Sử dụng Best Model) ---")
-    model.load_state_dict(torch.load(Config.MODEL_SAVE_PATH, weights_only=True))
-
-    # Lấy 1 câu mẫu từ tập train
-    sample_src = train_data_en[0]
-    sample_ref = train_data_fr[0]
-
-    pred = translate_sentence(sample_src, model)
-
-    print(f"SRC: {sample_src}")
-    print(f"REF: {sample_ref}")
-    print(f"PRED: {pred}")
-
-    # Tính BLEU đơn giản
-    smoothie = SmoothingFunction().method1
-    score = sentence_bleu([fr_tokenizer(sample_ref)], fr_tokenizer(pred), smoothing_function=smoothie)
-    print(f"BLEU Score: {score:.4f}")
+    #Test sau khi train
+    calculate_bleu_on_test_set(model, Config.TEST_EN_PATH, Config.TEST_FR_PATH)
