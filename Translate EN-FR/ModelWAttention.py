@@ -27,9 +27,9 @@ class Config:
     TEST_FR_PATH = "Data/Test/test_2016_flickr.fr"
 
     # Model Hyperparameters
-    ENC_EMB_DIM = 512 #256
-    DEC_EMB_DIM = 512 # 256
-    HID_DIM = 512
+    ENC_EMB_DIM = 256 #256
+    DEC_EMB_DIM = 256 # 256
+    HID_DIM = 256
     N_LAYERS = 1  # Với Attention, thường dùng 1 layer LSTM để đơn giản hóa dimension
     ENC_DROPOUT = 0.5
     DEC_DROPOUT = 0.5
@@ -316,10 +316,9 @@ def init_weights(m):
 
 model.apply(init_weights)
 
-optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
+optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=1e-5)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2)
 criterion = nn.CrossEntropyLoss(ignore_index=vocab_fr['<pad>'])
-
 
 # ==========================================
 # 4. TRAINING & BEAM SEARCH UTILITIES
