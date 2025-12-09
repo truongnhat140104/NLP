@@ -10,6 +10,7 @@ import random
 import time
 import math
 import sys
+import matplotlib.pyplot as plt
 
 # ==========================================
 # 1. CẤU HÌNH (CONFIGURATION)
@@ -25,15 +26,15 @@ class Config:
     TEST_FR_PATH = "Data/Test/test_2016_flickr.fr"
 
     # Model Hyperparameters
-    ENC_EMB_DIM = 512 #256
-    DEC_EMB_DIM = 512 #256
+    ENC_EMB_DIM = 512
+    DEC_EMB_DIM = 512
     HID_DIM = 512
     N_LAYERS = 2
     ENC_DROPOUT = 0.5
     DEC_DROPOUT = 0.5
 
     # Training Hyperparameters
-    BATCH_SIZE = 128 #32
+    BATCH_SIZE = 128
     LEARNING_RATE = 0.001
     N_EPOCHS = 15
     CLIP = 1
@@ -67,8 +68,7 @@ try:
     en_tokenizer = get_tokenizer("spacy", language="en_core_web_sm")
     fr_tokenizer = get_tokenizer("spacy", language="fr_core_news_sm")
 except OSError:
-    print(
-        "Vui lòng cài đặt spacy models: python -m spacy download en_core_web_sm && python -m spacy download fr_core_news_sm")
+    print("Vui lòng cài đặt spacy models: python -m spacy download en_core_web_sm && python -m spacy download fr_core_news_sm")
     sys.exit()
 
 
@@ -92,7 +92,7 @@ test_data = read_data(Config.TEST_EN_PATH, Config.TEST_FR_PATH)
 
 # Build Vocab
 vocab_en = build_vocab_from_iterator(
-    yield_tokens(train_data, en_tokenizer, 0), # 0 là tiếng Anh
+    yield_tokens(train_data, en_tokenizer, 0),
     min_freq=1,
     specials=Config.SPECIAL_TOKENS,
     special_first=True
@@ -206,7 +206,7 @@ class Seq2Seq(nn.Module):
             output, hidden, cell = self.decoder(input_token, hidden, cell)
             outputs[t] = output
             top1 = output.argmax(1)
-            # Teacher Forcing: dùng ground truth hay dùng dự đoán của model?
+            # Teacher Forcing
             input_token = trg[t] if random.random() < teacher_forcing_ratio else top1
 
         return outputs
@@ -305,7 +305,6 @@ def calculate_bleu_on_test_set(model, test_en_path, test_fr_path):
     print("\n--- BẮT ĐẦU ĐÁNH GIÁ TRÊN TẬP TEST ---")
     model.eval()
 
-    # Đọc file
     with open(test_en_path, 'r', encoding='utf-8') as f:
         test_en = [line.strip() for line in f]
     with open(test_fr_path, 'r', encoding='utf-8') as f:
@@ -314,19 +313,15 @@ def calculate_bleu_on_test_set(model, test_en_path, test_fr_path):
     predictions = []
     references = []
 
-    # Duyệt qua từng câu trong tập test
     for i in range(len(test_en)):
         src = test_en[i]
         trg = test_fr[i]
 
-        # --- SỬA LỖI TẠI ĐÂY: Truyền thêm 'model' ---
         pred_sent = translate_sentence(src, model)
 
-        # Tokenize kết quả dự đoán
         pred_tokens = fr_tokenizer(pred_sent)
         predictions.append(pred_tokens)
 
-        # Tokenize đáp án thật
         ref_tokens = [fr_tokenizer(trg)]
         references.append(ref_tokens)
 
@@ -339,6 +334,7 @@ def calculate_bleu_on_test_set(model, test_en_path, test_fr_path):
     print(f"TEST SET BLEU SCORE: {score * 100:.2f}")
     print(f"------------------------------------------------")
 
+# --- HÀM NÀY ĐÃ ĐƯỢC SỬA ĐỂ KHÔNG DÙNG BEAM SEARCH ---
 def translate_custom_sentences(model, sentence_pairs):
     print(f"\n{'=' * 20} DỊCH 5 CÂU TỰ CHỌN (KÈM ĐÁP ÁN) {'=' * 20}")
     model.eval()
@@ -346,17 +342,16 @@ def translate_custom_sentences(model, sentence_pairs):
     for i, (src, ref) in enumerate(sentence_pairs):
         start_time = time.time()
 
-        # Dịch
-        pred = beam_search_decode(model, src, beam_width=Config.BEAM_WIDTH)
+        # THAY ĐỔI TẠI ĐÂY: Dùng translate_sentence thay vì beam_search_decode
+        pred = translate_sentence(src, model)
 
         end_time = time.time()
 
         print(f"Custom #{i + 1} (Time: {end_time - start_time:.2f}s)")
         print(f" Input : {src}")
-        print(f" Ref   : {ref}")  # Đáp án chuẩn
-        print(f" Pred  : {pred}")  # Máy dịch
+        print(f" Ref   : {ref}")
+        print(f" Pred  : {pred}")
 
-        # So sánh nhanh xem đúng không
         if ref.lower().strip() == pred.lower().strip():
             print("  Evaluation: PERFECT!")
         else:
@@ -376,7 +371,7 @@ def draw_loss_chart(train_losses, val_losses, save_path="loss_chart.png"):
     plt.grid(True)
 
     plt.savefig(save_path)
-    plt.close()  # Đóng plot để giải phóng bộ nhớ
+    plt.close()
     print(f"\n📊 Đã lưu biểu đồ loss tại: {save_path}")
 
 # ==========================================
@@ -384,7 +379,7 @@ def draw_loss_chart(train_losses, val_losses, save_path="loss_chart.png"):
 # ==========================================
 
 if __name__ == "__main__":
-    print(f"\nBắt đầu huấn luyện {Config.N_EPOCHS} epochs (với Attention)...")
+    print(f"\nBắt đầu huấn luyện {Config.N_EPOCHS} epochs (no Attention, no Beam Search)...")
     best_valid_loss = float('inf')
     no_improve_epoch = 0
 

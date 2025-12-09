@@ -414,7 +414,7 @@ def draw_loss_chart(train_losses, val_losses, save_path="loss_chart.png"):
 # ==========================================
 
 if __name__ == "__main__":
-    print(f"\nBắt đầu huấn luyện {Config.N_EPOCHS} epochs (với Attention)...")
+    print(f"\nBắt đầu huấn luyện {Config.N_EPOCHS} epochs (no Attention)...")
     best_valid_loss = float('inf')
     no_improve_epoch = 0
 
