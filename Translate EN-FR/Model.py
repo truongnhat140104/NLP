@@ -41,7 +41,7 @@ class Config:
     # Training Hyperparameters
     BATCH_SIZE = 128
     LEARNING_RATE = 0.001
-    N_EPOCHS = 15
+    N_EPOCHS = 13
     CLIP = 1
     PATIENCE = 3
 
@@ -318,7 +318,7 @@ if __name__ == "__main__":
         ("A little girl is eating an apple.", "Une petite fille mange une pomme.")
     ]
 
-    for run_i in range(1, Config.NUM_RUNS + 1):
+    for run_i in range(6, Config.NUM_RUNS + 1):
         print(f"\n{'=' * 20} RUN {run_i}/{Config.NUM_RUNS} {'=' * 20}")
 
         # --- KHỞI TẠO MODEL MỚI TINH ---
@@ -332,7 +332,7 @@ if __name__ == "__main__":
         criterion = nn.CrossEntropyLoss(ignore_index=vocab_fr['<pad>'])
 
         # Đặt tên file model riêng cho từng run
-        current_model_path = f"best_model_no_attn_run_{run_i}.pt"
+        current_model_path = f"Model/Model/best_model_no_attn_run_{run_i}.pth"
 
         best_valid_loss = float('inf')
         no_improve_epoch = 0
