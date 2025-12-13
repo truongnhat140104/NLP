@@ -11,129 +11,118 @@ import time
 import sys
 import matplotlib.pyplot as plt
 import os
-import numpy as np
-
+from functools import partial
 
 # ==========================================
-# 1. CẤU HÌNH (CONFIGURATION)
+# 1. CÀI ĐẶT THAM SỐ TOÀN CỤC (GLOBAL VARS)
 # ==========================================
-class Config:
-    # File Paths
-    TRAIN_EN_PATH = "Data/Train/train.en"
-    TRAIN_FR_PATH = "Data/Train/train.fr"
-    VAL_EN_PATH = "Data/Value/val.en"
-    VAL_FR_PATH = "Data/Value/val.fr"
+# --- Đường dẫn file dữ liệu (Cần tồn tại trước) ---
+TRAIN_EN_PATH = "Data/Train/train.en"
+TRAIN_FR_PATH = "Data/Train/train.fr"
+VAL_EN_PATH = "Data/Value/val.en"
+VAL_FR_PATH = "Data/Value/val.fr"
+TEST_EN_PATH = "Data/Test/test_2016_flickr.en"
+TEST_FR_PATH = "Data/Test/test_2016_flickr.fr"
 
-    # Thư mục lưu biểu đồ (Cho Model không Attention)
-    GRAPH_SAVE_DIR = "Graph/Model"
+# --- Cấu hình thư mục đầu ra (Tự động tạo) ---
+OUTPUT_DIR = "outputs"  # Tất cả kết quả sẽ lưu vào đây
+MODEL_NAME = "best_model.pth"
+GRAPH_NAME = "loss_chart.png"
 
-    TEST_EN_PATH = "Data/Test/test_2016_flickr.en"
-    TEST_FR_PATH = "Data/Test/test_2016_flickr.fr"
+# --- Tham số Model ---
+ENC_EMB_DIM = 512
+DEC_EMB_DIM = 512
+HID_DIM = 512
+N_LAYERS = 2
+ENC_DROPOUT = 0.5
+DEC_DROPOUT = 0.5
 
-    # Model Hyperparameters (No Attention)
-    ENC_EMB_DIM = 512
-    DEC_EMB_DIM = 512
-    HID_DIM = 512
-    N_LAYERS = 2
-    ENC_DROPOUT = 0.5
-    DEC_DROPOUT = 0.5
+# --- Tham số Huấn luyện ---
+BATCH_SIZE = 128
+LEARNING_RATE = 0.001
+N_EPOCHS = 15
+CLIP = 1
+PATIENCE = 3
+TEACHER_FORCING_RATIO = 0.5
 
-    # Training Hyperparameters
-    BATCH_SIZE = 128
-    LEARNING_RATE = 0.001
-    N_EPOCHS = 13
-    CLIP = 1
-    PATIENCE = 3
-
-    NUM_RUNS = 10
-
-    # Special Tokens
-    SPECIAL_TOKENS = ['<unk>', '<pad>', '<sos>', '<eos>']
+# --- Token đặc biệt ---
+UNK_IDX, PAD_IDX, SOS_IDX, EOS_IDX = 0, 1, 2, 3
+SPECIAL_TOKENS = ['<unk>', '<pad>', '<sos>', '<eos>']
 
 
+# --- Thiết bị ---
 def get_device():
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    elif torch.backends.mps.is_available():
-        return torch.device('mps')
-    else:
-        return torch.device('cpu')
+    if torch.cuda.is_available(): return torch.device('cuda')
+    if torch.backends.mps.is_available(): return torch.device('mps')
+    return torch.device('cpu')
 
 
 DEVICE = get_device()
+print(f"🔹 Đang sử dụng thiết bị: {DEVICE}")
+
 
 # ==========================================
-# 2. XỬ LÝ DỮ LIỆU (DATA PROCESSING)
+# 2. XỬ LÝ DỮ LIỆU
 # ==========================================
-print("\n--- Đang xử lý dữ liệu ---")
+class TextProcessor:
+    def __init__(self):
+        try:
+            self.en_tokenizer = get_tokenizer("spacy", language="en_core_web_sm")
+            self.fr_tokenizer = get_tokenizer("spacy", language="fr_core_news_sm")
+        except OSError:
+            print("❌ Lỗi: Thiếu thư viện spacy. Chạy lệnh: python -m spacy download en_core_web_sm")
+            sys.exit()
+        self.vocab_en = None
+        self.vocab_fr = None
 
-try:
-    en_tokenizer = get_tokenizer("spacy", language="en_core_web_sm")
-    fr_tokenizer = get_tokenizer("spacy", language="fr_core_news_sm")
-except OSError:
-    print("Vui lòng cài đặt spacy models.")
-    sys.exit()
+    def build_vocab(self, train_data):
+        print("🔹 Đang xây dựng bộ từ điển...")
+
+        def yield_tokens(data, tokenizer, idx):
+            for sample in data:
+                yield tokenizer(sample[idx])
+
+        self.vocab_en = build_vocab_from_iterator(
+            yield_tokens(train_data, self.en_tokenizer, 0),
+            min_freq=1, specials=SPECIAL_TOKENS, special_first=True
+        )
+        self.vocab_fr = build_vocab_from_iterator(
+            yield_tokens(train_data, self.fr_tokenizer, 1),
+            min_freq=1, specials=SPECIAL_TOKENS, special_first=True
+        )
+        self.vocab_en.set_default_index(UNK_IDX)
+        self.vocab_fr.set_default_index(UNK_IDX)
+        print(f"   Size EN: {len(self.vocab_en)} | Size FR: {len(self.vocab_fr)}")
+
+    def text_pipeline(self, text, tokenizer, vocab):
+        tokens = tokenizer(text)
+        indices = [SOS_IDX] + vocab(tokens) + [EOS_IDX]
+        return torch.tensor(indices, dtype=torch.long)
 
 
 def read_data(path_en, path_fr):
-    with open(path_en, "r", encoding="utf-8") as f:
-        data_en = [line.strip() for line in f]
-    with open(path_fr, "r", encoding="utf-8") as f:
-        data_fr = [line.strip() for line in f]
-    return list(zip(data_en, data_fr))
+    with open(path_en, "r", encoding="utf-8") as f: en = [l.strip() for l in f]
+    with open(path_fr, "r", encoding="utf-8") as f: fr = [l.strip() for l in f]
+    return list(zip(en, fr))
 
 
-def yield_tokens(data_iterator, tokenizer, index):
-    for data_sample in data_iterator:
-        yield tokenizer(data_sample[index])
-
-
-train_data = read_data(Config.TRAIN_EN_PATH, Config.TRAIN_FR_PATH)
-val_data = read_data(Config.VAL_EN_PATH, Config.VAL_FR_PATH)
-test_data = read_data(Config.TEST_EN_PATH, Config.TEST_FR_PATH)
-
-vocab_en = build_vocab_from_iterator(yield_tokens(train_data, en_tokenizer, 0), min_freq=1,
-                                     specials=Config.SPECIAL_TOKENS, special_first=True)
-vocab_fr = build_vocab_from_iterator(yield_tokens(train_data, fr_tokenizer, 1), min_freq=1,
-                                     specials=Config.SPECIAL_TOKENS, special_first=True)
-
-vocab_en.set_default_index(vocab_en['<unk>'])
-vocab_fr.set_default_index(vocab_fr['<unk>'])
-
-
-def text_pipeline(text, tokenizer, vocab):
-    tokens = tokenizer(text)
-    indices = [vocab['<sos>']] + vocab(tokens) + [vocab['<eos>']]
-    return torch.tensor(indices, dtype=torch.long)
-
-
-def collate_batch(batch):
-    processed_batch = []
+def collate_fn(batch, processor):
+    batch.sort(key=lambda x: len(processor.text_pipeline(x[0], processor.en_tokenizer, processor.vocab_en)),
+               reverse=True)
+    src_list, trg_list, src_lens = [], [], []
     for src_text, trg_text in batch:
-        src_tensor = text_pipeline(src_text, en_tokenizer, vocab_en)
-        trg_tensor = text_pipeline(trg_text, fr_tokenizer, vocab_fr)
-        processed_batch.append((src_tensor, trg_tensor, len(src_tensor)))
-    processed_batch.sort(key=lambda x: x[2], reverse=True)
-    src_list, trg_list, src_lens = zip(*processed_batch)
-    src_batch = pad_sequence(src_list, padding_value=vocab_en['<pad>'])
-    trg_batch = pad_sequence(trg_list, padding_value=vocab_fr['<pad>'])
-    src_lens = torch.tensor(src_lens, dtype=torch.int64)
-    return src_batch, trg_batch, src_lens
-
-
-train_loader = DataLoader(train_data, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch, shuffle=True)
-if len(val_data) == 0:
-    train_size = int(0.9 * len(train_data))
-    val_size = len(train_data) - train_size
-    train_set, val_set = torch.utils.data.random_split(train_data, [train_size, val_size])
-    train_loader = DataLoader(train_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch)
-else:
-    val_loader = DataLoader(val_data, batch_size=Config.BATCH_SIZE, collate_fn=collate_batch)
+        src_tensor = processor.text_pipeline(src_text, processor.en_tokenizer, processor.vocab_en)
+        trg_tensor = processor.text_pipeline(trg_text, processor.fr_tokenizer, processor.vocab_fr)
+        src_list.append(src_tensor)
+        trg_list.append(trg_tensor)
+        src_lens.append(len(src_tensor))
+    src_batch = pad_sequence(src_list, padding_value=PAD_IDX)
+    trg_batch = pad_sequence(trg_list, padding_value=PAD_IDX)
+    return src_batch, trg_batch, torch.tensor(src_lens, dtype=torch.int64)
 
 
 # ==========================================
-# 3. KIẾN TRÚC MÔ HÌNH (NO ATTENTION)
+# 3. MÔ HÌNH (SEQ2SEQ)
 # ==========================================
 class Encoder(nn.Module):
     def __init__(self, input_dim, emb_dim, hid_dim, n_layers, dropout):
@@ -158,9 +147,9 @@ class Decoder(nn.Module):
         self.fc_out = nn.Linear(hid_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, input, hidden, cell):
-        input = input.unsqueeze(0)
-        embedded = self.dropout(self.embedding(input))
+    def forward(self, input_token, hidden, cell):
+        input_token = input_token.unsqueeze(0)
+        embedded = self.dropout(self.embedding(input_token))
         output, (hidden, cell) = self.rnn(embedded, (hidden, cell))
         prediction = self.fc_out(output.squeeze(0))
         return prediction, hidden, cell
@@ -169,15 +158,12 @@ class Decoder(nn.Module):
 class Seq2Seq(nn.Module):
     def __init__(self, encoder, decoder, device):
         super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.device = device
+        self.encoder, self.decoder, self.device = encoder, decoder, device
 
     def forward(self, src, trg, src_len, teacher_forcing_ratio=0.5):
         batch_size = src.shape[1]
         trg_len = trg.shape[0]
-        trg_vocab_size = self.decoder.output_dim
-        outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
+        outputs = torch.zeros(trg_len, batch_size, self.decoder.output_dim).to(self.device)
         hidden, cell = self.encoder(src, src_len)
         input_token = trg[0, :]
         for t in range(1, trg_len):
@@ -197,17 +183,16 @@ def init_weights(m):
 
 
 # ==========================================
-# 4. TRAINING & EVAL UTILITIES
+# 4. HUẤN LUYỆN & EVAL
 # ==========================================
-def train_epoch(model, iterator, optimizer, criterion, clip):
+def train_step(model, iterator, optimizer, criterion, clip):
     model.train()
     epoch_loss = 0
     for src, trg, src_len in iterator:
         src, trg, src_len = src.to(DEVICE), trg.to(DEVICE), src_len.to(DEVICE)
         optimizer.zero_grad()
-        output = model(src, trg, src_len)
-        output_dim = output.shape[-1]
-        output = output[1:].view(-1, output_dim)
+        output = model(src, trg, src_len, TEACHER_FORCING_RATIO)
+        output = output[1:].view(-1, output.shape[-1])
         trg = trg[1:].view(-1)
         loss = criterion(output, trg)
         loss.backward()
@@ -217,184 +202,153 @@ def train_epoch(model, iterator, optimizer, criterion, clip):
     return epoch_loss / len(iterator)
 
 
-def evaluate_epoch(model, iterator, criterion):
+def evaluate_step(model, iterator, criterion):
     model.eval()
     epoch_loss = 0
     with torch.no_grad():
         for src, trg, src_len in iterator:
             src, trg, src_len = src.to(DEVICE), trg.to(DEVICE), src_len.to(DEVICE)
-            output = model(src, trg, src_len, teacher_forcing_ratio=0)
-            output_dim = output.shape[-1]
-            output = output[1:].view(-1, output_dim)
+            output = model(src, trg, src_len, 0)
+            output = output[1:].view(-1, output.shape[-1])
             trg = trg[1:].view(-1)
             loss = criterion(output, trg)
             epoch_loss += loss.item()
     return epoch_loss / len(iterator)
 
 
-def translate_sentence(sentence, model, max_len=50):
+def translate_sentence(sentence, model, processor, max_len=50):
     model.eval()
-    tokens = [token for token in en_tokenizer(sentence)]
-    indices = [vocab_en['<sos>']] + [vocab_en[t] for t in tokens] + [vocab_en['<eos>']]
+    tokens = processor.en_tokenizer(sentence)
+    indices = [SOS_IDX] + processor.vocab_en(tokens) + [EOS_IDX]
     src_tensor = torch.LongTensor(indices).unsqueeze(1).to(DEVICE)
     src_len = torch.LongTensor([len(indices)]).to(DEVICE)
     with torch.no_grad():
         hidden, cell = model.encoder(src_tensor, src_len)
-    trg_indices = [vocab_fr['<sos>']]
+    trg_indices = [SOS_IDX]
     for _ in range(max_len):
         trg_tensor = torch.LongTensor([trg_indices[-1]]).to(DEVICE)
         with torch.no_grad():
             output, hidden, cell = model.decoder(trg_tensor, hidden, cell)
         pred_token = output.argmax(1).item()
         trg_indices.append(pred_token)
-        if pred_token == vocab_fr['<eos>']:
-            break
-    trg_tokens = [vocab_fr.lookup_token(i) for i in trg_indices]
+        if pred_token == EOS_IDX: break
+    trg_tokens = [processor.vocab_fr.lookup_token(i) for i in trg_indices]
     return " ".join(trg_tokens[1:-1])
 
 
-def calculate_bleu_on_test_set(model, test_en_path, test_fr_path):
-    print(f"   [Evaluating BLEU...]")
-    model.eval()
-    with open(test_en_path, 'r', encoding='utf-8') as f:
-        test_en = [line.strip() for line in f]
-    with open(test_fr_path, 'r', encoding='utf-8') as f:
-        test_fr = [line.strip() for line in f]
-    predictions = []
-    references = []
-    for i in range(len(test_en)):
-        src = test_en[i]
-        trg = test_fr[i]
-        pred_sent = translate_sentence(src, model)
-        predictions.append(fr_tokenizer(pred_sent))
-        references.append([fr_tokenizer(trg)])
-    score = corpus_bleu(references, predictions)
-    return score
-
-
-def translate_custom_sentences(model, sentence_pairs):
-    print(f"\n   --- Custom Translations ---")
-    model.eval()
-    for i, (src, ref) in enumerate(sentence_pairs):
-        pred = translate_sentence(src, model)
-        print(f"   In: {src}")
-        print(f"   Out: {pred}")
-
-
-def draw_loss_chart(train_losses, val_losses, run_id, save_dir):
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train Loss', marker='o', color='blue')
-    plt.plot(val_losses, label='Validation Loss', marker='o', color='red')
-    plt.title(f'Training & Validation Loss - RUN {run_id}')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
-    file_name = f"loss_chart_run_{run_id}.png"
-    save_path = os.path.join(save_dir, file_name)
-    plt.savefig(save_path)
-    plt.close()
-    print(f"   📊 Đã lưu biểu đồ tại: {save_path}")
-
-
 # ==========================================
-# 5. MAIN EXECUTION (VÒNG LẶP 10 LẦN)
+# 5. CHƯƠNG TRÌNH CHÍNH
 # ==========================================
-
 if __name__ == "__main__":
-    if not os.path.exists(Config.GRAPH_SAVE_DIR):
-        os.makedirs(Config.GRAPH_SAVE_DIR)
-        print(f"Đã tạo thư mục: {Config.GRAPH_SAVE_DIR}")
+    # --- TỰ ĐỘNG TẠO THƯ MỤC LƯU ---
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        print(f"🔹 Đã tạo thư mục lưu trữ: {OUTPUT_DIR}")
 
-    print(f"\n🚀 BẮT ĐẦU CHẠY THỰC NGHIỆM {Config.NUM_RUNS} LẦN ĐỘC LẬP (NO ATTENTION)")
+    # Định nghĩa đường dẫn file đầy đủ
+    full_model_path = os.path.join(OUTPUT_DIR, MODEL_NAME)
+    full_graph_path = os.path.join(OUTPUT_DIR, GRAPH_NAME)
 
-    # List để lưu kết quả BLEU của từng Run
-    all_runs_bleu = []
+    # 1. Load Data
+    processor = TextProcessor()
+    raw_train = read_data(TRAIN_EN_PATH, TRAIN_FR_PATH)
+    raw_val = read_data(VAL_EN_PATH, VAL_FR_PATH)
+    processor.build_vocab(raw_train)
 
-    # Danh sách câu test nhanh
-    my_sentences = [
-        ("A black dog is running on the grass.", "Un chien noir court sur l'herbe."),
-        ("Two men are playing soccer in the park.", "Deux hommes jouent au football dans le parc."),
-        ("A little girl is eating an apple.", "Une petite fille mange une pomme.")
+    train_loader = DataLoader(raw_train, batch_size=BATCH_SIZE, collate_fn=partial(collate_fn, processor=processor),
+                              shuffle=True)
+    val_loader = DataLoader(raw_val, batch_size=BATCH_SIZE, collate_fn=partial(collate_fn, processor=processor))
+
+    # 2. Init Model
+    enc = Encoder(len(processor.vocab_en), ENC_EMB_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
+    dec = Decoder(len(processor.vocab_fr), DEC_EMB_DIM, HID_DIM, N_LAYERS, DEC_DROPOUT)
+    model = Seq2Seq(enc, dec, DEVICE).to(DEVICE)
+    model.apply(init_weights)
+
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2)
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+
+    # 3. Training Loop
+    print(f"\n🚀 BẮT ĐẦU TRAINING ({N_EPOCHS} Epochs)...")
+    best_valid_loss = float('inf')
+    no_improve = 0
+    train_history, valid_history = [], []
+
+    for epoch in range(N_EPOCHS):
+        start_t = time.time()
+
+        train_loss = train_step(model, train_loader, optimizer, criterion, CLIP)
+        valid_loss = evaluate_step(model, val_loader, criterion)
+
+        train_history.append(train_loss)
+        valid_history.append(valid_loss)
+        scheduler.step(valid_loss)
+
+        mins, secs = divmod(time.time() - start_t, 60)
+
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            # SỬA LỖI: Dùng biến full_model_path đã định nghĩa
+            torch.save(model.state_dict(), full_model_path)
+            no_improve = 0
+            save_msg = "✅ Saved Best"
+        else:
+            no_improve += 1
+            save_msg = f"⚠️ ({no_improve}/{PATIENCE})"
+
+        print(
+            f"Ep {epoch + 1:02} | {int(mins)}m {int(secs)}s | Tr: {train_loss:.3f} | Val: {valid_loss:.3f} | {save_msg}")
+
+        if no_improve >= PATIENCE:
+            print("🛑 Early Stopping!")
+            break
+
+    # 4. Vẽ biểu đồ (SỬA LỖI ĐƯỜNG DẪN)
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_history, label='Train Loss')
+    plt.plot(valid_history, label='Val Loss')
+    plt.legend()
+    plt.title('Training Result')
+    plt.grid(True)
+    plt.savefig(full_graph_path)  # Lưu vào outputs/loss_chart.png
+    print(f"📊 Đã lưu biểu đồ tại: {full_graph_path}")
+
+    # 5. Đánh giá (Test)
+    print("\n🔎 ĐÁNH GIÁ TRÊN TẬP TEST & DỊCH THỬ")
+    # SỬA LỖI: Truyền đúng đường dẫn file model vào hàm load
+    if os.path.exists(full_model_path):
+        model.load_state_dict(torch.load(full_model_path, map_location=DEVICE))
+    else:
+        print("⚠️ Cảnh báo: Không tìm thấy file model để load!")
+
+    new_test_sentences = [
+        ("The cat sleeps on the sofa.", "Le chat dort sur le canapé."),
+        ("I love learning new languages every day.", "J'adore apprendre de nouvelles langues chaque jour."),
+        ("Where is the nearest train station?", "Où est la gare la plus proche ?"),
+        ("She bought a beautiful red dress yesterday.", "Elle a acheté une belle robe rouge hier."),
+        ("Can you help me with my homework please?", "Peux-tu m'aider avec mes devoirs s'il te plaît ?")
     ]
 
-    for run_i in range(6, Config.NUM_RUNS + 1):
-        print(f"\n{'=' * 20} RUN {run_i}/{Config.NUM_RUNS} {'=' * 20}")
+    print(f"{'=' * 50}")
+    print("DỊCH THỬ 5 CÂU MỚI:")
+    for i, (src, ref) in enumerate(new_test_sentences):
+        pred = translate_sentence(src, model, processor)
+        print(f"#{i + 1} In:  {src}")
+        print(f"   Out: {pred}")
+        print(f"   Ref: {ref}\n")
+    print(f"{'=' * 50}")
 
-        # --- KHỞI TẠO MODEL MỚI TINH ---
-        enc = Encoder(len(vocab_en), Config.ENC_EMB_DIM, Config.HID_DIM, Config.N_LAYERS, Config.ENC_DROPOUT)
-        dec = Decoder(len(vocab_fr), Config.DEC_EMB_DIM, Config.HID_DIM, Config.N_LAYERS, Config.DEC_DROPOUT)
-        model = Seq2Seq(enc, dec, DEVICE).to(DEVICE)
-        model.apply(init_weights)
-
-        optimizer = optim.Adam(model.parameters(), lr=Config.LEARNING_RATE)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2)
-        criterion = nn.CrossEntropyLoss(ignore_index=vocab_fr['<pad>'])
-
-        # Đặt tên file model riêng cho từng run
-        current_model_path = f"Model/Model/best_model_no_attn_run_{run_i}.pth"
-
-        best_valid_loss = float('inf')
-        no_improve_epoch = 0
-        train_history = []
-        valid_history = []
-
-        # --- TRAINING LOOP ---
-        for epoch in range(Config.N_EPOCHS):
-            start_time = time.time()
-
-            train_loss = train_epoch(model, train_loader, optimizer, criterion, Config.CLIP)
-            valid_loss = evaluate_epoch(model, val_loader, criterion)
-
-            train_history.append(train_loss)
-            valid_history.append(valid_loss)
-
-            scheduler.step(valid_loss)
-
-            end_time = time.time()
-            mins, secs = divmod(end_time - start_time, 60)
-
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                torch.save(model.state_dict(), current_model_path)
-                no_improve_epoch = 0
-                save_msg = "✅ Save Best"
-            else:
-                no_improve_epoch += 1
-                save_msg = f"⚠️ No improve ({no_improve_epoch}/{Config.PATIENCE})"
-
-            print(
-                f'   Ep {epoch + 1:02} | {int(mins)}m {int(secs)}s | Tr: {train_loss:.3f} | Val: {valid_loss:.3f} | {save_msg}')
-
-            if no_improve_epoch >= Config.PATIENCE:
-                print("   🛑 Early Stopping!")
-                break
-
-        # Lưu biểu đồ
-        draw_loss_chart(train_history, valid_history, run_i, Config.GRAPH_SAVE_DIR)
-
-        # --- ĐÁNH GIÁ (EVALUATION) CHO RUN NÀY ---
-        print(f"\n   🔎 Đang đánh giá Run {run_i}...")
-        model.load_state_dict(torch.load(current_model_path, map_location=DEVICE))
-
-        # 1. Tính BLEU trên tập test
-        bleu_score = calculate_bleu_on_test_set(model, Config.TEST_EN_PATH, Config.TEST_FR_PATH)
-        all_runs_bleu.append(bleu_score)
-        print(f"   🏆 BLEU Score (Run {run_i}): {bleu_score * 100:.2f}")
-
-        # 2. Dịch thử vài câu
-        translate_custom_sentences(model, my_sentences)
-
-        # Dọn dẹp bộ nhớ GPU
-        del model, optimizer, scheduler, criterion
-        torch.cuda.empty_cache()
-
-    # --- TỔNG KẾT ---
-    print(f"\n{'=' * 40}")
-    print(f"KẾT QUẢ TỔNG HỢP SAU {Config.NUM_RUNS} LẦN CHẠY (NO ATTENTION)")
-    print(f"{'=' * 40}")
-    print(f"Chi tiết BLEU từng run: {[round(b * 100, 2) for b in all_runs_bleu]}")
-    print(f"Trung bình cộng (Mean BLEU): {np.mean(all_runs_bleu) * 100:.2f}")
-    print(f"Độ lệch chuẩn (Std Dev): {np.std(all_runs_bleu) * 100:.2f}")
-    print(f"Cao nhất (Max): {np.max(all_runs_bleu) * 100:.2f}")
-    print(f"Thấp nhất (Min): {np.min(all_runs_bleu) * 100:.2f}")
+    try:
+        with open(TEST_EN_PATH, 'r', encoding='utf-8') as f:
+            src_test = [l.strip() for l in f]
+        with open(TEST_FR_PATH, 'r', encoding='utf-8') as f:
+            trg_test = [l.strip() for l in f]
+        preds, refs = [], []
+        for s, t in zip(src_test, trg_test):
+            preds.append(processor.fr_tokenizer(translate_sentence(s, model, processor)))
+            refs.append([processor.fr_tokenizer(t)])
+        score = corpus_bleu(refs, preds)
+        print(f"🏆 Final BLEU Score on Test Set: {score * 100:.2f}")
+    except Exception as e:
+        print(f"⚠️ Không thể tính BLEU (Check file path): {e}")
